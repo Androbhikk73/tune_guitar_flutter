@@ -1,0 +1,398 @@
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:flutter_pitch_detection/flutter_pitch_detection.dart';
+import 'dart:math' as math;
+import 'package:wakelock_plus/wakelock_plus.dart';
+
+void main() {
+  runApp(const GuitarTunerApp());
+}
+
+class GuitarTunerApp extends StatelessWidget {
+  const GuitarTunerApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return const MaterialApp(
+      home: TunerHome(),
+      debugShowCheckedModeBanner: false,
+    );
+  }
+}
+
+class TunerHome extends StatefulWidget {
+  const TunerHome({super.key});
+
+  @override
+  State<TunerHome> createState() => _TunerHomeState();
+}
+
+class _TunerHomeState extends State<TunerHome> {
+  final FlutterPitchDetection _pitchDetector = FlutterPitchDetection();
+  StreamSubscription<Map<String, dynamic>>? _sub;
+
+  bool _isRecording = false;
+  bool _autoMode = false;
+  final Map<String, bool> _stringLocked = {};
+
+  String _note = "";
+  String _noteOctave = "";
+  double _frequency = 0.0;
+  bool _isOnPitch = false;
+  int _currentAutoIndex = 0;
+  double _pitchDeviation = 0.0;
+  double _volume = 0.0;
+
+  String? _targetNote;
+  int? _targetOctave;
+  double? _targetFrequency;
+
+  final List<GuitarString> _strings = [
+    GuitarString('Low E', 'E', 2, 82.4069),
+    GuitarString('A', 'A', 2, 110.0),
+    GuitarString('D', 'D', 3, 146.83),
+    GuitarString('G', 'G', 3, 196.0),
+    GuitarString('B', 'B', 3, 246.94),
+    GuitarString('High E', 'E', 4, 329.63),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    WakelockPlus.enable();
+    for (var s in _strings) {
+      _stringLocked["${s.note}${s.octave}"] = false;
+    }
+    _resetSelection(); // initial state
+  }
+
+  @override
+  void dispose() {
+    WakelockPlus.disable();
+    _sub?.cancel();
+    _pitchDetector.stopDetection();
+    super.dispose();
+  }
+
+  void _resetSelection() {
+    _targetNote = null;
+    _targetOctave = null;
+    _targetFrequency = null;
+    _currentAutoIndex = 0;
+    _stringLocked.updateAll((key, value) => false);
+  }
+
+  Future<void> _startListening() async {
+    if (_isRecording) return;
+    try {
+      await _pitchDetector.startDetection();
+      bool rec = await _pitchDetector.isRecording();
+      setState(() => _isRecording = rec);
+
+      _pitchDetector.setParameters(
+        toleranceCents: 0.6,
+        bufferSize: 8196,
+        sampleRate: 44100,
+        minPrecision: 0.8,
+        a4Reference: 440.0,
+      );
+
+      _sub = _pitchDetector.onPitchDetected.listen((data) {
+        setState(() {
+          _note = data['note'] ?? '';
+          _noteOctave = data['noteOctave'] ?? '';
+          _frequency = (data['frequency'] ?? 0.0).toDouble();
+          _isOnPitch = data['isOnPitch'] ?? false;
+          _pitchDeviation = (data['pitchDeviation'] ?? 0.0).toDouble();
+          _volume = (data['volume'] ?? 0.0).toDouble();
+
+          // AUTO mode only
+          if (_autoMode && _frequency > 0) {
+            _autoSelectString(_frequency);
+          }
+        });
+      });
+    } catch (e) {
+      debugPrint("Start error: $e");
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Failed to start listening: $e')));
+    }
+  }
+
+  Future<void> _stopListening() async {
+    if (!_isRecording) return;
+    try {
+      await _sub?.cancel();
+      _sub = null;
+      await _pitchDetector.stopDetection();
+      setState(() {
+        _isRecording = false;
+        _note = '';
+        _noteOctave = '';
+        _frequency = 0.0;
+        _pitchDeviation = 0.0;
+        _isOnPitch = false;
+      });
+    } catch (e) {
+      debugPrint("Stop error: $e");
+    }
+  }
+
+  void _selectString(GuitarString s) {
+    if (_autoMode) return; // manual selection disabled in AUTO
+    setState(() {
+      _targetNote = s.note;
+      _targetOctave = s.octave;
+      _targetFrequency = s.frequency;
+    });
+  }
+
+  void _autoSelectString(double freq) {
+    if (!_autoMode || freq <= 0) return;
+
+    // Skip already locked strings
+    while (_currentAutoIndex < _strings.length &&
+        _stringLocked["${_strings[_currentAutoIndex].note}${_strings[_currentAutoIndex].octave}"]!) {
+      _currentAutoIndex++;
+    }
+
+    if (_currentAutoIndex >= _strings.length) return;
+
+    final currentString = _strings[_currentAutoIndex];
+
+    // Auto-select current string if not locked
+    _targetNote = currentString.note;
+    _targetOctave = currentString.octave;
+    _targetFrequency = currentString.frequency;
+
+    // Lock string if perfectly tuned
+    if (_isOnPitch) {
+      _stringLocked["${currentString.note}${currentString.octave}"] = true;
+      _currentAutoIndex++;
+    }
+  }
+
+  double _centsFromFrequencyDiff(double freq, double target) {
+    if (freq <= 0 || target <= 0) return 0.0;
+    return 1200.0 * (math.log(freq / target) / math.log(2));
+  }
+
+  double _currentDeviation() {
+    if (_targetFrequency == null) return 0.0;
+    return _centsFromFrequencyDiff(_frequency, _targetFrequency!);
+  }
+
+  Color _indicatorColor() {
+    if (_isOnPitch) return Colors.green;
+    if (_targetFrequency == null) return Colors.white24;
+    final cents = _currentDeviation().abs();
+    if (cents < 15) return Colors.white;
+    return Colors.red;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final double deviation = _targetFrequency == null
+        ? 0.0
+        : _currentDeviation();
+
+    return Scaffold(
+      backgroundColor: Colors.black,
+      body: SafeArea(
+        child: Column(
+          children: [
+            // Header
+            Padding(
+              padding: const EdgeInsets.all(12),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Text(
+                    "Tune Your Guitar",
+                    style: TextStyle(
+                      color: Colors.white,
+                      fontSize: 26,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  Row(
+                    children: [
+                      const Text("AUTO", style: TextStyle(color: Colors.white)),
+                      Switch(
+                        value: _autoMode,
+                        onChanged: (val) {
+                          setState(() {
+                            _autoMode = val;
+                            if (_autoMode) _resetSelection();
+                          });
+                        },
+                        activeThumbColor: Colors.green,
+                      ),
+                      IconButton(
+                        onPressed: _isRecording
+                            ? _stopListening
+                            : _startListening,
+                        icon: Icon(
+                          _isRecording ? Icons.mic : Icons.mic_none,
+                          color: _isRecording ? Colors.green : Colors.white,
+                          size: 32,
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 20),
+            Text(
+              _note.isNotEmpty ? _note + _noteOctave : "—",
+              style: const TextStyle(
+                fontSize: 40,
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 20),
+            // Indicator
+            SizedBox(
+              height: 180,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  Container(
+                    width: 2,
+                    height: double.infinity,
+                    color: _isOnPitch ? Colors.green : Colors.white24,
+                  ),
+                  if (_isOnPitch)
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        border: Border.all(color: Colors.green, width: 4.0),
+                        borderRadius: BorderRadius.circular(100),
+                      ),
+                      child: const Icon(
+                        Icons.check,
+                        color: Colors.green,
+                        size: 26,
+                      ),
+                    )
+                  else
+                    AnimatedAlign(
+                      alignment: Alignment(
+                        (deviation / 50).clamp(-1.0, 1.0),
+                        0,
+                      ),
+                      duration: const Duration(milliseconds: 200),
+                      curve: Curves.easeOut,
+                      child: Container(
+                        width: 40,
+                        height: 40,
+                        decoration: BoxDecoration(
+                          border: Border.all(
+                            color: _indicatorColor(),
+                            width: 4.0,
+                          ),
+                          borderRadius: BorderRadius.circular(100),
+                        ),
+                      ),
+                    ),
+                  Positioned(
+                    bottom: 0,
+                    child: Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: const BoxDecoration(
+                        shape: BoxShape.circle,
+                        color: Colors.black87,
+                      ),
+                      child: Text(
+                        _note.isNotEmpty ? "$_note$_noteOctave" : "",
+                        style: TextStyle(
+                          color: _isOnPitch ? Colors.green : Colors.white,
+                          fontSize: 20,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 10),
+            Text(
+              _isOnPitch
+                  ? "Perfectly tuned!"
+                  : _frequency > 0
+                  ? "${deviation.toStringAsFixed(1)} cents"
+                  : "Start tuning by playing any string",
+              style: const TextStyle(color: Colors.white54, fontSize: 14),
+            ),
+            // Headstock
+            SizedBox(
+              width: 500,
+              height: 450,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  Image.asset(
+                    "assets/images/headstock.png",
+                    fit: BoxFit.contain,
+                  ),
+                  Positioned(left: 15, top: 105, child: _pegButton("D", 3)),
+                  Positioned(left: 15, top: 170, child: _pegButton("A", 2)),
+                  Positioned(left: 15, bottom: 160, child: _pegButton("E", 2)),
+                  Positioned(right: 10, top: 105, child: _pegButton("G", 3)),
+                  Positioned(right: 10, top: 170, child: _pegButton("B", 3)),
+                  Positioned(right: 10, bottom: 160, child: _pegButton("E", 4)),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _pegButton(String note, int octave) {
+    final key = "$note$octave";
+    final isActive =
+        (_targetNote != null &&
+            _targetOctave != null &&
+            _targetNote == note &&
+            _targetOctave == octave) ||
+        _stringLocked[key]!;
+
+    return ElevatedButton(
+      style: ElevatedButton.styleFrom(
+        backgroundColor: Colors.grey[850],
+        shape: const CircleBorder(),
+        padding: const EdgeInsets.all(14),
+        side: isActive
+            ? const BorderSide(color: Colors.green, width: 2)
+            : BorderSide.none,
+      ),
+      onPressed: _autoMode
+          ? null
+          : () {
+              final s = _strings.firstWhere(
+                (gs) => gs.note == note && gs.octave == octave,
+                orElse: () => _strings.first,
+              );
+              _selectString(s);
+            },
+      child: Text(
+        note,
+        style: const TextStyle(color: Colors.white, fontSize: 16),
+      ),
+    );
+  }
+}
+
+class GuitarString {
+  final String label;
+  final String note;
+  final int octave;
+  final double frequency;
+  GuitarString(this.label, this.note, this.octave, this.frequency);
+}

@@ -1,0 +1,31 @@
+name: tune_guitar
+description: A simple guitar tuner built with Flutter and flutter_pitch_detection.
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.9.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  cupertino_icons: ^1.0.8
+  flutter_pitch_detection: ^1.3.1
+  provider: ^6.0.5
+  wakelock_plus: ^1.4.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  flutter_launcher_icons: ^0.14.4
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/images/headstock.png
+
+flutter_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon.png"
